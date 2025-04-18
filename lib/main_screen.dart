@@ -19,6 +19,14 @@ class _MainScreenState extends State<MainScreen> {
   MediaStream? localStream;
   RTCDataChannel? dataChannel;
 
+  // to play audio
+  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
+
+  bool isOngoingConversation = false;
+  String transcript = "";
+
+  bool isLoading = false;
+
   @override
   void initState() {
     super.initState();
@@ -35,32 +43,93 @@ class _MainScreenState extends State<MainScreen> {
       appBar: AppBar(
         title: const Text("Ai Assistant with Flutter WebRTC"),
       ),
-      body: Column(
-        children: [
-          ElevatedButton(
-              onPressed: () {
-                startWebRtcSession();
-              },
-              child: const Text("Start Call")),
-          const SizedBox(
-            height: 20,
+      body: Center(
+        child: SizedBox(
+          width: 480,
+          child: Column(
+            children: [
+              (transcript.isNotEmpty && isOngoingConversation)
+                  ? SizedBox(
+                      width: double.infinity,
+                      child: Text("AI: $transcript"),
+                    )
+                  : const SizedBox(),
+              Expanded(
+                child: Container(
+                  width: double.infinity,
+                  alignment: Alignment.center,
+                  child: (isLoading)
+                      ? const CircularProgressIndicator()
+                      : Container(
+                          padding: const EdgeInsets.all(24),
+                          child: (!isOngoingConversation)
+                              ? Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text("Click Button To Start"),
+                                  IconButton(
+                                      onPressed: () {
+                                        startWebRtcSession();
+                                      },
+                                      icon: Container(
+                                        decoration: const BoxDecoration(
+                                            color: Colors.green,
+                                            shape: BoxShape.circle),
+                                        padding: const EdgeInsets.all(16),
+                                        child: const Icon(
+                                          Icons.call,
+                                          color: Colors.white,
+                                          size: 30,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              )
+                              : Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text("Speak freely"),
+                                  IconButton(
+                                      onPressed: () {
+                                        stopWebRtcConnection();
+                                        setState(() {
+                                          transcript = "";
+                                        });
+                                      },
+                                      icon: Container(
+                                        decoration: const BoxDecoration(
+                                            color: Colors.red,
+                                            shape: BoxShape.circle),
+                                        padding: const EdgeInsets.all(16),
+                                        child: const Icon(
+                                          Icons.call_end,
+                                          color: Colors.white,
+                                          size: 30,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                        ),
+                ),
+              ),
+            ],
           ),
-          ElevatedButton(
-              onPressed: () {
-                stopWebRtcConnection();
-              },
-              child: const Text("End Call")),
-        ],
+        ),
       ),
     );
   }
 
   Future<void> startWebRtcSession() async {
+    print("Starting WebRTC Session");
     try {
       stopWebRtcConnection();
+      setState(() {
+        isLoading = true;
+      });
       //Get the emphemral key from OPEN AI
       emphemeralKey = await OpenAIService.getEphemeralToken();
-      print("Key Generated: " + emphemeralKey);
+      print("Key Generated: $emphemeralKey");
 
       //Creating configurations
       final configs = {
@@ -78,16 +147,27 @@ class _MainScreenState extends State<MainScreen> {
       peerConnection = await createPeerConnection(configs);
       if (peerConnection == null) {
         throw Exception("Failed to create peer connection");
+      } else {
+        setState(() {
+          isOngoingConversation = true;
+        });
       }
       peerConnection?.onIceCandidate = (candidate) async {
-        print("Got the ICE Candidate: " + (candidate.candidate ?? ""));
+        print("Got the ICE Candidate: ${candidate.candidate ?? ""}");
         if (candidate.candidate != null && peerConnection != null) {
           try {
             await peerConnection!.addCandidate(candidate);
           } catch (e) {
-            print("Error adding candidate to the peer connection: " +
-                e.toString());
+            print("Error adding candidate to the peer connection: $e");
           }
+        }
+      };
+
+      // Track The Audio
+      peerConnection?.onTrack = (RTCTrackEvent event) {
+        debugPrint(">> onTrack: ${event.track.kind}");
+        if (event.track.kind == 'audio' || event.track.kind == 'video') {
+          _remoteRenderer.srcObject = event.streams.first; // Playing audio
         }
       };
 
@@ -206,6 +286,11 @@ class _MainScreenState extends State<MainScreen> {
                   print('State: Connected');
                   await Future.delayed(const Duration(seconds: 1));
 
+                  setState(() {
+                    isLoading = false;
+                  });
+
+                  // Send the initial greeting message
                   break;
                 case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
                   print('State: Disconnected');
@@ -230,6 +315,8 @@ class _MainScreenState extends State<MainScreen> {
     dataChannel?.onMessage = (message) {
       try {
         final data = json.decode(message.text);
+        handleOpenAIStream(data);
+
         print('\n==================== OpenAI Response ====================');
         print('Raw response data: $data');
 
@@ -289,6 +376,29 @@ class _MainScreenState extends State<MainScreen> {
       await peerConnection?.close();
       peerConnection = null;
     }
+    setState(() {
+      isOngoingConversation = false;
+    });
+
     print("WEB RTc Connection terminated successfully");
+  }
+
+  void handleOpenAIStream(Map<String, dynamic> data) {
+    final type = data['type'];
+
+    debugPrint("type: $type");
+
+    if (type == 'response.audio') {
+      // NOT RECEIVE response.audio if using WebRTC, use WebSocket
+      // playAudioFromBase64(data['audio']);
+    } else if (type == 'input_audio_buffer.speech_started') {
+      setState(() {
+        transcript = "";
+      });
+    } else if (type == 'response.audio_transcript.delta') {
+      setState(() {
+        transcript += data['delta'];
+      });
+    }
   }
 }
